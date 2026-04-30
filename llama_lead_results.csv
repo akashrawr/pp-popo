@@ -1,0 +1,42 @@
+lead_id,llama_output
+1,"{
+""IntentLevel"": ""Medium"",
+""Urgency"": ""This Month"",
+""BudgetSignals"": ""No Budget Info"",Step 4 — Final Qualification Layer
+
+Example:
+
+Score > 75 → Qualified
+
+Score 50–75 → Needs Follow-up
+
+Score < 50 → Unqualified
+""CustomerImportance"": ""High"",
+""DecisionAuthority"": ""Influencer"",
+""BusinessFit"": ""Strong"",
+""PainPointClarity"": ""Clear"",
+""ProductMatch"": ""Partial"",
+""MissingInformationAreas"": [""Implementation Details""]
+}"
+2,"{
+""intentLevel"": ""Medium"",
+""urgency"": ""This Month"",
+""budgetSignals"": ""Budget Mentioned"",
+""customerImportance"": ""High"",
+""decisionAuthority"": ""Decision Maker"",
+""businessFit"": ""Strong"",
+""painPointClarity"": ""Moderate"",
+""productMatch"": ""Partial"",
+""missingInformationAreas"": [""Cloud deployment requirements""]
+}"
+3,"{
+""intentLevel"": ""Medium"",
+""urgency"": ""This Quarter"",
+""budgetSignals"": ""No Budget Info"",
+""customerImportance"": ""High"",
+""decisionAuthority"": ""Influencer"",
+""businessFit"": ""Partial"",
+""painPointClarity"": ""Moderate"",
+""productMatch"": ""Strong"",
+""missingInformationAreas"": [""Urgency"", ""Budget""]
+}"
