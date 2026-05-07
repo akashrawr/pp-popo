@@ -13,11 +13,11 @@ OLLAMA_URL        = "http://localhost:11434/api/generate"
 MODEL             = "llama3"
 INPUT_FILE        = "synthetic_leads_shap - copy.xlsx"
 OUTPUT_FILE       = "leads_with_explanations_v0.xlsx"
-TOP_N_FEATURES    = 5      # how many SHAP drivers to highlight in the prompt
-MAX_TOKENS        = 400    # cap on LLM response length
+TOP_N_FEATURES    = 5    # how many SHAP drivers to highlight in the prompt
+MAX_TOKENS        = 200    # cap on LLM response length
 TEMPERATURE       = 0.4    # lower = more consistent/factual tone
 BATCH_SIZE        = 10     # rows to process before saving a checkpoint
-REQUEST_TIMEOUT   = 120    # seconds before giving up on one LLM call
+REQUEST_TIMEOUT   = 300    # seconds before giving up on one LLM call
 
 # STEP 1 — LOAD & PARSE
 def load_data(path: str) -> pd.DataFrame:
@@ -74,25 +74,60 @@ def extract_topic_signals(row: pd.Series) -> list[dict]:
                 "shap":      float(row[shap_col]) if shap_col in row.index else 0.0,
             })
     return signals
-
 # STEP 2 — PROMPT ENGINEERING
-SYSTEM_PROMPT = """You are an expert aviation sales analyst. Your job is to write a clear, 
-concise, and compelling lead story in ONE paragraph (4–6 sentences) for a sales representative.
 
-Rules:
-- Write in plain business English — no bullet points, no headers.
-- Ground every claim in the data provided. Never invent information.
-- Mention the lead rating, predicted conversion probability, and top drivers naturally in the narrative.
-- Highlight what is working in the lead's favor AND what concerns exist.
-- End with a recommended next action for the sales rep.
-- Do NOT repeat the raw numbers verbatim — interpret them (e.g. "strong webinar engagement" instead of "shap_value = 1.35").
+SYSTEM_PROMPT = """
+You are an expert sales analyst.
+
+Your task is to generate:
+1. A natural-language lead narrative for a sales representative.
+2. A confidence score showing how reliable the narrative is based on:
+   - completeness of lead data,
+   - consistency of SHAP signals,
+   - engagement evidence,
+   - missing or conflicting information.
+
+OUTPUT RULES:
+- Write ONLY valid JSON.
+- Do not include markdown.
+- Do not include explanations outside JSON.
+
+Required JSON format:
+
+{
+  "lead_story": "4-6 sentence narrative paragraph",
+  "confidence_pct": 85,
+  "confidence_reason": "Short explanation of why confidence is high or low"
+}
+
+WRITING RULES:
+- Use plain business English.
+- No bullet points.
+- No headers.
+- Never invent information.
+- Mention strengths and risks naturally.
+- End with a recommended sales action.
+- Interpret signals instead of repeating raw SHAP numbers.
+"""
+
+EXAMPLE_OUTPUTS = """
+Example 1:
+{
+  "lead_story": "This lead shows strong conversion potential due to high engagement activity, clear product interest, and a verified corporate account. The opportunity is supported by strong commercial intent signals and healthy demographic alignment, suggesting the prospect is actively evaluating solutions. However, limited phone availability and incomplete lead descriptions may slow direct outreach effectiveness. The lead is currently rated as high quality with a strong predicted conversion likelihood, making it suitable for immediate follow-up by the regional sales team. A personalized outreach focused on product fit and timing would likely improve conversion chances.",
+  "confidence_pct": 91,
+  "confidence_reason": "High confidence due to strong engagement signals, verified corporate data, multiple aligned intent indicators, and minimal missing information."
+}
+
+Example 2:
+{
+  "lead_story": "This lead demonstrates moderate sales potential but contains several data gaps that reduce certainty around purchase intent. While the account appears to have some engagement activity and aligns with early intent indicators, weak contact coverage and limited supporting behavioral evidence create uncertainty around readiness to convert. The predicted conversion likelihood remains moderate, though negative conversion drivers suggest the lead may still be in an exploratory phase. Sales outreach should focus on validating current business needs and confirming decision-maker engagement before prioritizing further resources.",
+  "confidence_pct": 63,
+  "confidence_reason": "Moderate confidence because several important engagement and contact signals are missing or weak."
+}
 """
 
 def build_prompt(row: pd.Series, shap_info: dict, topic_signals: list[dict]) -> str:
-    """
-    Compose the full user prompt block from a lead row.
-    """
-    # ── Lead summary block ──
+
     lead_block = f"""
 LEAD SUMMARY
 ------------
@@ -112,7 +147,6 @@ Phone         : {'Available' if row['Phone_Available'] else 'Not Available'}
 Corporate Email: {'Yes' if row['Corporate_Email'] else 'No'}
 """.strip()
 
-    # ── Scores block ──
     score_block = f"""
 MODEL SCORES
 ------------
@@ -122,40 +156,44 @@ AQL Category                     : {row['aql_category'].replace('_', ' ').title(
 Behavior Score                   : {row['Behavior_Score']:.1f}/100
 Demographic Score                : {row['Demographic_Score']:.1f}/100
 Engagement Score                 : {row['Engagement_Score']:.1f}/100
-Confidence                       : {row['pred_confidence']:.1%}
+Model Confidence                 : {row['pred_confidence']:.1%}
 """.strip()
 
-    # ── Top SHAP drivers ──
     pos_lines = "\n".join(
-        f"  (+) {f}: strongly supports conversion" for f, _ in shap_info["positive_drivers"]
+        f"(+) {f}" for f, _ in shap_info["positive_drivers"]
     )
+
     neg_lines = "\n".join(
-        f"  (-) {f}: acts as a barrier to conversion" for f, _ in shap_info["negative_drivers"]
+        f"(-) {f}" for f, _ in shap_info["negative_drivers"]
     )
+
     shap_block = f"""
-KEY CONVERSION DRIVERS (from SHAP analysis)
---------------------------------------------
+KEY CONVERSION DRIVERS
+----------------------
 Positive Signals:
-{pos_lines if pos_lines else '  None in top features'}
+{pos_lines if pos_lines else 'None'}
 
 Negative Signals:
-{neg_lines if neg_lines else '  None in top features'}
+{neg_lines if neg_lines else 'None'}
 """.strip()
 
-    # ── Topic alignment signals ──
     aligned     = [s["label"] for s in topic_signals if s["aligned"]]
     not_aligned = [s["label"] for s in topic_signals if not s["aligned"]]
+
     topic_block = f"""
 TOPIC ALIGNMENT SIGNALS
 -----------------------
-Aligned    : {', '.join(aligned) if aligned else 'None'}
-Not Aligned: {', '.join(not_aligned) if not_aligned else 'None'}
+Aligned:
+{', '.join(aligned) if aligned else 'None'}
+
+Not Aligned:
+{', '.join(not_aligned) if not_aligned else 'None'}
 """.strip()
 
-    # ── Final assembled prompt ──
     return f"""
-Based on the following lead data, write a storytelling paragraph that explains this lead 
-to a sales representative in a natural, insightful, and action-oriented way.
+{EXAMPLE_OUTPUTS}
+
+Now generate the JSON output for this lead.
 
 {lead_block}
 
@@ -164,8 +202,6 @@ to a sales representative in a natural, insightful, and action-oriented way.
 {shap_block}
 
 {topic_block}
-
-Your narrative paragraph:
 """.strip()
 
 # STEP 3 — LLM CALL
@@ -197,54 +233,97 @@ def call_ollama(system: str, user_prompt: str) -> str:
 
 # STEP 4 — PROCESS ALL LEADS
 def process_leads(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Iterate over every lead row, build the prompt, call LLaMA3, and store the result.
-    """
-    explanations  = []
-    prompts_used  = []
-    durations     = []
+
+    explanations       = []
+    prompts_used       = []
+    durations          = []
+    llm_confidences    = []
+    llm_conf_reasons   = []
 
     print(f"\nRunning LLaMA3 explanations for {len(df)} leads...\n")
 
     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Generating"):
+
         shap_info     = extract_shap_features(row)
         topic_signals = extract_topic_signals(row)
-        prompt        = build_prompt(row, shap_info, topic_signals)
 
-        t0       = time.time()
+        prompt = build_prompt(row, shap_info, topic_signals)
+
+        t0 = time.time()
+
         response = call_ollama(SYSTEM_PROMPT, prompt)
-        elapsed  = round(time.time() - t0, 2)
 
-        explanations.append(response)
+        elapsed = round(time.time() - t0, 2)
+
+        # defaults
+        lead_story       = response
+        confidence_pct   = None
+        confidence_reason = None
+
+        try:
+            parsed = json.loads(response)
+
+            lead_story        = parsed.get("lead_story", "")
+            confidence_pct    = parsed.get("confidence_pct", None)
+            confidence_reason = parsed.get("confidence_reason", "")
+
+        except Exception:
+            pass
+
+        explanations.append(lead_story)
         prompts_used.append(prompt)
         durations.append(elapsed)
+        llm_confidences.append(confidence_pct)
+        llm_conf_reasons.append(confidence_reason)
 
-        # checkpoint save every BATCH_SIZE rows
         if (idx + 1) % BATCH_SIZE == 0:
-            _checkpoint_save(df, explanations, prompts_used, durations, idx)
+            _checkpoint_save(
+                df,
+                explanations,
+                prompts_used,
+                durations,
+                llm_confidences,
+                llm_conf_reasons,
+                idx
+            )
 
-    df["llm_explanation"]  = explanations
-    df["prompt_used"]      = prompts_used
-    df["llm_duration_sec"] = durations
+    df["llm_explanation"]       = explanations
+    df["prompt_used"]           = prompts_used
+    df["llm_duration_sec"]      = durations
+    df["llm_confidence_pct"]    = llm_confidences
+    df["llm_confidence_reason"] = llm_conf_reasons
+
     return df
 
-def _checkpoint_save(df, explanations, prompts_used, durations, up_to_idx):
-    """Save a partial checkpoint so no work is lost on long runs."""
+def _checkpoint_save(
+    df,
+    explanations,
+    prompts_used,
+    durations,
+    llm_confidences,
+    llm_conf_reasons,
+    up_to_idx
+):
+
     temp = df.iloc[:len(explanations)].copy()
-    temp["llm_explanation"]  = explanations
-    temp["prompt_used"]      = prompts_used
-    temp["llm_duration_sec"] = durations
+
+    temp["llm_explanation"]       = explanations
+    temp["prompt_used"]           = prompts_used
+    temp["llm_duration_sec"]      = durations
+    temp["llm_confidence_pct"]    = llm_confidences
+    temp["llm_confidence_reason"] = llm_conf_reasons
+
     ckpt = OUTPUT_FILE.replace(".xlsx", f"_checkpoint_{up_to_idx+1}.xlsx")
+
     temp.to_excel(ckpt, index=False)
-    tqdm.write(f"  ✓ Checkpoint saved → {ckpt}")
+
+    tqdm.write(f"✓ Checkpoint saved → {ckpt}")
 
 # STEP 5 — SAVE OUTPUT
 def save_output(df: pd.DataFrame, path: str):
     from openpyxl.styles import Font, PatternFill, Alignment, PatternFill
     from openpyxl import load_workbook
-
     df.to_excel(path, index=False, engine="openpyxl")
-
     wb = load_workbook(path)
     ws = wb.active
 
@@ -274,28 +353,8 @@ def save_output(df: pd.DataFrame, path: str):
     wb.save(path)
     print(f"\nFinal output saved → {path}")
 
-# STEP 6 — DEMO / DRY-RUN (no Ollama needed)
-def demo_prompt(df: pd.DataFrame, row_index: int = 0):
-    """
-    Print the fully assembled prompt for one lead without calling Ollama.
-    Useful for iterating on prompt design.
-    """
-    row           = df.iloc[row_index]
-    shap_info     = extract_shap_features(row)
-    topic_signals = extract_topic_signals(row)
-    prompt        = build_prompt(row, shap_info, topic_signals)
-
-    print("=" * 70)
-    print(f"SYSTEM PROMPT:\n{SYSTEM_PROMPT}")
-    print("=" * 70)
-    print(f"USER PROMPT (Lead index {row_index} — {row['Lead_ID']}):\n")
-    print(prompt)
-    print("=" * 70)
-    return prompt
-
 if __name__ == "__main__":
     df = load_data(INPUT_FILE)
     final_df = process_leads(df)
     save_output(final_df, OUTPUT_FILE)
     print("Done.")
-    
