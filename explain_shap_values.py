@@ -29,16 +29,26 @@ DEFAULT_EXCLUDE = {
 
 DEFAULT_PROMPT = (
     "You are a business analyst writing for non-technical stakeholders.\n"
-    "Given SHAP contributions for one row, write a short, clear paragraph (3-5 sentences) "
+    "Given contribution values for one row, write a short, clear paragraph (3-5 sentences) "
     "explaining what most influenced the score in plain language.\n"
-    "Use only the features provided. Say which factors pushed the score up or down, and "
-    "avoid jargon.\n"
+    "Use only the data provided. Include key contribution values (with + or -), and reference any "
+    "context metrics to improve transparency and traceability. Avoid jargon.\n"
+    "Use the contribution metrics to summarize the overall tilt (net impact, total positives vs "
+    "negatives), and call out a dominant factor if one clearly stands out.\n"
+    "Context metrics (numeric):\n"
+    "{context_metrics}\n"
+    "Context fields (other):\n"
+    "{context_fields}\n"
+    "Contribution metrics:\n"
+    "{contribution_metrics}\n"
     "Top contributors:\n"
     "{top_contributors}\n"
     "Top positive contributors:\n"
     "{top_positive}\n"
     "Top negative contributors:\n"
     "{top_negative}\n"
+    "All contributors:\n"
+    "{all_contributors}\n"
 )
 
 
@@ -145,38 +155,110 @@ def extract_contributions(row, pairs, numeric_cols):
     return contributions
 
 
-def build_prompt(contributions, top_n, template):
+def compute_contribution_metrics(contributions):
     if not contributions:
-        top_lines = "- none"
-        pos_lines = "- none"
-        neg_lines = "- none"
+        return {
+            "total_positive": 0.0,
+            "total_negative": 0.0,
+            "net_impact": 0.0,
+            "total_abs": 0.0,
+            "pos_count": 0,
+            "neg_count": 0,
+            "dominant_feature": "none",
+            "dominant_value": 0.0,
+            "dominance_ratio": 0.0,
+        }
+
+    total_positive = sum(value for _, value in contributions if value > 0)
+    total_negative = sum(value for _, value in contributions if value < 0)
+    total_abs = sum(abs(value) for _, value in contributions)
+    net_impact = total_positive + total_negative
+    pos_count = sum(1 for _, value in contributions if value > 0)
+    neg_count = sum(1 for _, value in contributions if value < 0)
+    dominant_feature, dominant_value = max(
+        contributions, key=lambda item: abs(item[1])
+    )
+    dominance_ratio = abs(dominant_value) / total_abs if total_abs else 0.0
+
+    return {
+        "total_positive": total_positive,
+        "total_negative": total_negative,
+        "net_impact": net_impact,
+        "total_abs": total_abs,
+        "pos_count": pos_count,
+        "neg_count": neg_count,
+        "dominant_feature": dominant_feature,
+        "dominant_value": dominant_value,
+        "dominance_ratio": dominance_ratio,
+    }
+
+
+def format_lines(label_value_pairs):
+    if not label_value_pairs:
+        return "- none"
+    return "\n".join(f"- {label}: {value}" for label, value in label_value_pairs)
+
+
+def format_contributors(contributions):
+    if not contributions:
+        return "- none"
+    return "\n".join(
+        f"- {name}: {value:+.4f}" for name, value in contributions
+    )
+
+
+def build_prompt(
+    contributions,
+    top_n,
+    template,
+    context_metrics,
+    context_fields,
+):
+    if not contributions:
         return template.format(
-            top_contributors=top_lines,
-            top_positive=pos_lines,
-            top_negative=neg_lines,
+            context_metrics=format_lines(context_metrics),
+            context_fields=format_lines(context_fields),
+            contribution_metrics="- none",
+            top_contributors="- none",
+            top_positive="- none",
+            top_negative="- none",
+            all_contributors="- none",
             top_n=top_n,
         )
 
     top = sorted(contributions, key=lambda item: abs(item[1]), reverse=True)[:top_n]
     pos = [(name, val) for name, val in top if val > 0]
     neg = [(name, val) for name, val in top if val < 0]
+    all_sorted = sorted(
+        contributions, key=lambda item: abs(item[1]), reverse=True
+    )
 
-    top_lines = "\n".join(f"- {name}: {val:+.4f}" for name, val in top)
-    pos_lines = (
-        "\n".join(f"- {name}: {val:+.4f}" for name, val in pos)
-        if pos
-        else "- none"
-    )
-    neg_lines = (
-        "\n".join(f"- {name}: {val:+.4f}" for name, val in neg)
-        if neg
-        else "- none"
-    )
+    metrics = compute_contribution_metrics(contributions)
+    metric_lines = [
+        ("total_positive", f"{metrics['total_positive']:+.4f}"),
+        ("total_negative", f"{metrics['total_negative']:+.4f}"),
+        ("net_impact", f"{metrics['net_impact']:+.4f}"),
+        ("total_abs", f"{metrics['total_abs']:.4f}"),
+        ("pos_count", str(metrics["pos_count"])),
+        ("neg_count", str(metrics["neg_count"])),
+        (
+            "dominant_feature",
+            f"{metrics['dominant_feature']} ({metrics['dominant_value']:+.4f})",
+        ),
+        (
+            "dominance_ratio",
+            f"{metrics['dominance_ratio'] * 100:.1f}%",
+        ),
+    ]
 
     return template.format(
-        top_contributors=top_lines,
-        top_positive=pos_lines,
-        top_negative=neg_lines,
+        context_metrics=format_lines(context_metrics),
+        context_fields=format_lines(context_fields),
+        contribution_metrics=format_lines(metric_lines),
+        top_contributors=format_contributors(top),
+        top_positive=format_contributors(pos),
+        top_negative=format_contributors(neg),
+        all_contributors=format_contributors(all_sorted),
         top_n=top_n,
     )
 
@@ -215,15 +297,51 @@ def main():
 
     pairs = detect_indexed_pairs(df, VALUE_PREFIX.strip(), NAME_PREFIX.strip())
     numeric_cols = []
+    used_cols = set()
     if not pairs:
         numeric_cols = infer_numeric_columns(df, [], DEFAULT_EXCLUDE)
         if not numeric_cols:
             raise SystemExit("No paired columns or numeric columns found to explain.")
+        used_cols.update(numeric_cols)
+    else:
+        used_cols.update([value_col for value_col, _ in pairs])
+        used_cols.update([name_col for _, name_col in pairs])
+
+    context_metric_cols = [
+        col
+        for col in df.columns
+        if col not in used_cols and pd.api.types.is_numeric_dtype(df[col])
+    ]
+    context_field_cols = [
+        col
+        for col in df.columns
+        if col not in used_cols and col not in context_metric_cols
+    ]
 
     explanations = []
     for _, row in df.iterrows():
         contributions = extract_contributions(row, pairs, numeric_cols)
-        prompt = build_prompt(contributions, TOP_N, DEFAULT_PROMPT)
+        context_metrics = []
+        for col in context_metric_cols:
+            value = row.get(col)
+            if pd.isna(value):
+                continue
+            context_metrics.append((str(col), f"{float(value):.4f}"))
+
+        context_fields = []
+        for col in context_field_cols:
+            value = row.get(col)
+            if pd.isna(value):
+                continue
+            context_fields.append((str(col), str(value)))
+
+        prompt = build_prompt(
+            contributions,
+            TOP_N,
+            DEFAULT_PROMPT,
+            context_metrics,
+            context_fields,
+        )
         explanation = call_ollama(
             OLLAMA_URL,
             MODEL_NAME,
