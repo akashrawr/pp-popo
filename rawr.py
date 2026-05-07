@@ -1,45 +1,29 @@
 """
-lead_explainability.py
-======================
 Uses LLaMA3 (via Ollama) to generate a natural-language story for each lead,
 grounded in SHAP values, topic alignment signals, and lead context.
-
-Requirements:
-    pip install pandas openpyxl requests tqdm
-
-Ollama must be running locally:
-    ollama serve
-    ollama pull llama3
 """
-
 import json
 import time
 import requests
 import pandas as pd
 from tqdm import tqdm
 
-# ─────────────────────────────────────────────
 # CONFIG
-# ─────────────────────────────────────────────
 OLLAMA_URL        = "http://localhost:11434/api/generate"
 MODEL             = "llama3"
 INPUT_FILE        = "synthetic_leads_shap - copy.xlsx"
-OUTPUT_FILE       = "leads_with_explanations.xlsx"
+OUTPUT_FILE       = "leads_with_explanations_v0.xlsx"
 TOP_N_FEATURES    = 5      # how many SHAP drivers to highlight in the prompt
 MAX_TOKENS        = 400    # cap on LLM response length
 TEMPERATURE       = 0.4    # lower = more consistent/factual tone
 BATCH_SIZE        = 10     # rows to process before saving a checkpoint
 REQUEST_TIMEOUT   = 120    # seconds before giving up on one LLM call
 
-
-# ─────────────────────────────────────────────
 # STEP 1 — LOAD & PARSE
-# ─────────────────────────────────────────────
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_excel(path)
     print(f"Loaded {len(df)} leads with {len(df.columns)} columns.")
     return df
-
 
 def extract_shap_features(row: pd.Series, top_n: int = TOP_N_FEATURES) -> dict:
     """
@@ -64,7 +48,6 @@ def extract_shap_features(row: pd.Series, top_n: int = TOP_N_FEATURES) -> dict:
         "positive_drivers": positive_drivers,
         "negative_drivers": negative_drivers,
     }
-
 
 def extract_topic_signals(row: pd.Series) -> list[dict]:
     """
@@ -92,10 +75,7 @@ def extract_topic_signals(row: pd.Series) -> list[dict]:
             })
     return signals
 
-
-# ─────────────────────────────────────────────
 # STEP 2 — PROMPT ENGINEERING
-# ─────────────────────────────────────────────
 SYSTEM_PROMPT = """You are an expert aviation sales analyst. Your job is to write a clear, 
 concise, and compelling lead story in ONE paragraph (4–6 sentences) for a sales representative.
 
@@ -188,10 +168,7 @@ to a sales representative in a natural, insightful, and action-oriented way.
 Your narrative paragraph:
 """.strip()
 
-
-# ─────────────────────────────────────────────
 # STEP 3 — LLM CALL
-# ─────────────────────────────────────────────
 def call_ollama(system: str, user_prompt: str) -> str:
     """
     Send a prompt to the local Ollama LLaMA3 instance and return the response text.
@@ -218,10 +195,7 @@ def call_ollama(system: str, user_prompt: str) -> str:
     except Exception as e:
         return f"[ERROR] {str(e)}"
 
-
-# ─────────────────────────────────────────────
 # STEP 4 — PROCESS ALL LEADS
-# ─────────────────────────────────────────────
 def process_leads(df: pd.DataFrame) -> pd.DataFrame:
     """
     Iterate over every lead row, build the prompt, call LLaMA3, and store the result.
@@ -254,7 +228,6 @@ def process_leads(df: pd.DataFrame) -> pd.DataFrame:
     df["llm_duration_sec"] = durations
     return df
 
-
 def _checkpoint_save(df, explanations, prompts_used, durations, up_to_idx):
     """Save a partial checkpoint so no work is lost on long runs."""
     temp = df.iloc[:len(explanations)].copy()
@@ -265,10 +238,7 @@ def _checkpoint_save(df, explanations, prompts_used, durations, up_to_idx):
     temp.to_excel(ckpt, index=False)
     tqdm.write(f"  ✓ Checkpoint saved → {ckpt}")
 
-
-# ─────────────────────────────────────────────
 # STEP 5 — SAVE OUTPUT
-# ─────────────────────────────────────────────
 def save_output(df: pd.DataFrame, path: str):
     from openpyxl.styles import Font, PatternFill, Alignment, PatternFill
     from openpyxl import load_workbook
@@ -302,12 +272,9 @@ def save_output(df: pd.DataFrame, path: str):
     ws.freeze_panes = "A2"
     ws.row_dimensions[1].height = 30
     wb.save(path)
-    print(f"\n✅ Final output saved → {path}")
+    print(f"\nFinal output saved → {path}")
 
-
-# ─────────────────────────────────────────────
 # STEP 6 — DEMO / DRY-RUN (no Ollama needed)
-# ─────────────────────────────────────────────
 def demo_prompt(df: pd.DataFrame, row_index: int = 0):
     """
     Print the fully assembled prompt for one lead without calling Ollama.
@@ -326,45 +293,9 @@ def demo_prompt(df: pd.DataFrame, row_index: int = 0):
     print("=" * 70)
     return prompt
 
-
-# ─────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="LLaMA3 Lead Explainability Engine")
-    parser.add_argument("--demo",   action="store_true",
-                        help="Print prompt for lead 0 without calling Ollama")
-    parser.add_argument("--row",    type=int, default=0,
-                        help="Row index to use in --demo mode (default: 0)")
-    parser.add_argument("--limit",  type=int, default=None,
-                        help="Process only the first N leads (useful for testing)")
-    parser.add_argument("--input",  type=str, default=INPUT_FILE,
-                        help=f"Input Excel file (default: {INPUT_FILE})")
-    parser.add_argument("--output", type=str, default=OUTPUT_FILE,
-                        help=f"Output Excel file (default: {OUTPUT_FILE})")
-    args = parser.parse_args()
-
-    df = load_data(args.input)
-
-    if args.demo:
-        # ── Just preview the prompt, don't call LLM ──
-        demo_prompt(df, row_index=args.row)
-
-    else:
-        # ── Full run ──
-        if args.limit:
-            print(f"⚠  Limiting to first {args.limit} leads.")
-            df = df.head(args.limit).copy()
-
-        df = process_leads(df)
-        save_output(df, args.output)
-
-        # Quick summary stats
-        errors = df["llm_explanation"].str.startswith("[ERROR]").sum()
-        avg_t  = df["llm_duration_sec"].mean()
-        print(f"\nSummary:")
-        print(f"  Total leads processed : {len(df)}")
-        print(f"  Errors                : {errors}")
-        print(f"  Avg. time per lead    : {avg_t:.1f}s")
+    df = load_data(INPUT_FILE)
+    final_df = process_leads(df)
+    save_output(final_df, OUTPUT_FILE)
+    print("Done.")
+    
