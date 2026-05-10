@@ -14,6 +14,8 @@ VALUE_PREFIX = "shap_value"
 NAME_PREFIX = "feature_name"
 TOP_N = 5
 TEMPERATURE = 0.2
+MAX_TOKENS = 300
+STOP_TOKENS = ["<|user|>", "<|system|>"]
 TIMEOUT = 60
 
 DEFAULT_EXCLUDE = {
@@ -49,6 +51,12 @@ DEFAULT_PROMPT = (
     "{top_negative}\n"
     "All contributors:\n"
     "{all_contributors}\n"
+)
+
+SYSTEM_PROMPT = (
+    "Write one concise paragraph in plain business English. "
+    "Ground every statement in the provided data, avoid jargon, and do not invent details. "
+    "Mention key numeric metrics and the most important drivers."
 )
 
 
@@ -263,12 +271,19 @@ def build_prompt(
     )
 
 
-def call_ollama(url, model, prompt, system, temperature, timeout):
+def call_ollama(url, model, prompt, system, temperature, timeout, max_tokens, stop):
     payload = {"model": model, "prompt": prompt, "stream": False}
     if system:
         payload["system"] = system
+    options = {}
     if temperature is not None:
-        payload["options"] = {"temperature": temperature}
+        options["temperature"] = temperature
+    if max_tokens:
+        options["num_predict"] = max_tokens
+    if stop:
+        options["stop"] = stop
+    if options:
+        payload["options"] = options
 
     try:
         response = requests.post(url, json=payload, timeout=timeout)
@@ -342,14 +357,19 @@ def main():
             context_metrics,
             context_fields,
         )
-        explanation = call_ollama(
-            OLLAMA_URL,
-            MODEL_NAME,
-            prompt,
-            system="",
-            temperature=TEMPERATURE,
-            timeout=TIMEOUT,
-        )
+        try:
+            explanation = call_ollama(
+                OLLAMA_URL,
+                MODEL_NAME,
+                prompt,
+                system=SYSTEM_PROMPT,
+                temperature=TEMPERATURE,
+                timeout=TIMEOUT,
+                max_tokens=MAX_TOKENS,
+                stop=STOP_TOKENS,
+            )
+        except RuntimeError as exc:
+            explanation = f"[ERROR] {exc}"
         explanations.append(explanation)
 
     df_out = df.copy()
